@@ -40,7 +40,7 @@
             loadProgress: () => Promise.resolve(null),
             saveProgress: () => Promise.resolve(false),
             clearProgress: () => Promise.resolve(false),
-            saveFinalResult: async () => ({ message: '云端存储不可用，仅生成本地 Excel。' }),
+            saveFinalResult: async () => ({ saved: false, message: '云端存储不可用，仅生成本地 Excel。' }),
             finishExperiment: () => Promise.resolve({ message: '' })
         };
     }
