@@ -546,8 +546,9 @@ document.addEventListener('visibilitychange', () => {
     if (document.hidden) endInterruptedSession('page_hidden');
 });
 window.addEventListener('blur', () => {
-    if (experimentPhase === 'trial_response' || experimentPhase === 'practice_response') {
-        console.warn('[' + EXPERIMENT_NAME + '] 实验进行中窗口失焦，请保持页面在前台。');
+    if (experimentPhase === 'trial_running' || experimentPhase === 'trial_response' ||
+        experimentPhase === 'practice_running' || experimentPhase === 'practice_response') {
+        endInterruptedSession('window_blur');
     }
 });
 

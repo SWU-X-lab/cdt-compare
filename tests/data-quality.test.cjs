@@ -101,7 +101,7 @@ function browser(entry = entries[0], group = '0', code = '', resume = null) {
     }
     const space = () => window.emit('keydown', { code: 'Space', key: ' ' });
     return { evaluate, until, space, calls, exportsForTest: scope.exportsForTest,
-        start: () => ids.get('start-btn').emit('click'), canvas, document };
+        start: () => ids.get('start-btn').emit('click'), canvas, document, window };
 }
 
 test('条件缺失在 Excel 留空，真实零保留，超时和中断分别计数', () => {
@@ -159,6 +159,26 @@ test('正式组中断：保留一条中断记录，取消超时、不上传，�
     assert.equal(row.interruptionReason, 'pointer_lock_lost');
     assert.equal(row.CountedInK, 0);
     assert.equal(row.timeout, false);
+});
+
+test('独立窗口失焦：标签页仍可见、鼠标仍锁定时记为中断而非超时', async () => {
+    const b = browser(entries[0], '1', 'Test_A17', { completedBlocks: 1 });
+    await b.start();
+    await b.space();
+    await b.until("experimentPhase === 'trial_response'");
+    assert.equal(b.document.hidden, false);
+    assert.equal(b.document.pointerLockElement, b.canvas);
+    assert.ok(b.document.fullscreenElement);
+    await b.window.emit('blur');
+    await b.until("stimData.length > 0");
+    const row = b.evaluate('stimData[0]');
+    assert.equal(row.TrialGlobal, 21);
+    assert.equal(row.TrialStatus, 'interrupted');
+    assert.equal(row.interruptionReason, 'window_blur');
+    assert.equal(row.timeout, false);
+    await b.until("experimentPhase === 'finished'");
+    assert.deepEqual(b.calls.map(([name]) => name), ['initializeStorage', 'loadProgress']);
+    assert.equal(b.exportsForTest[0].length, 1);
 });
 
 test('正式组完成第四组可确认本会话数据上传，鼠标落点字段保留', async () => {
