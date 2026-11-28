@@ -155,6 +155,9 @@ const ctx = canvas.getContext('2d', { alpha: false });
 // --- 匿名被试编号：仅依据组别生成，不收集任何个人信息 ---
 const subjectIDInput = document.getElementById('subjectID');
 const subGroupInput = document.getElementById('subGroup');
+const participantCodeInput = document.getElementById('participantCode');
+const PARTICIPANT_CODE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{5,63}$/;
+
 function generateSubjectID(subGroupValue) {
     const group = normalizeDigits(subGroupValue);
     if (group === '0') return '1111';
@@ -163,10 +166,26 @@ function generateSubjectID(subGroupValue) {
     const suffix = Array.from({ length: 3 }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join('');
     return `${group}_${order}_${suffix}`;
 }
+// 使用完整匿名编号重现随机种子，不截去字母，也不依赖当前时间。
+function seedFromSubjectID(subjectID) {
+    let hash = 2166136261;
+    for (const ch of String(subjectID)) hash = Math.imul(hash ^ ch.charCodeAt(0), 16777619);
+    return (hash >>> 0) || 1;
+}
+
 function updateSubjectID() {
-    if (subjectIDInput && subGroupInput) subjectIDInput.value = /^[012]$/.test(normalizeDigits(subGroupInput.value)) ? generateSubjectID(subGroupInput.value) : '';
+    if (!subjectIDInput) return;
+    const group = readSubGroup();
+    const code = participantCodeInput ? participantCodeInput.value : '';
+    subjectIDInput.value = group === '0' ? '1111'
+        : (/^[12]$/.test(group) && PARTICIPANT_CODE_PATTERN.test(code) ? code : '');
 }
 if (subGroupInput) subGroupInput.addEventListener('input', updateSubjectID);
+if (participantCodeInput) participantCodeInput.addEventListener('input', updateSubjectID);
+
+function experimentStorage() {
+    return p.debugMode ? null : (window.CLTStorage || null);
+}
 
 // 掩蔽身份证号（用于数据导出，保护隐私）
 function maskIdCard(idCard) {
@@ -224,17 +243,19 @@ document.getElementById('start-btn').addEventListener('click', async () => {
     p.subAge = '';
     p.subIdCard = '';
     p.subPhone = '';
-    // 匿名编号由组别生成；0 为固定调试编号。
-    p.subjectID = generateSubjectID(subGroupValue);
-    if (subjectIDInput) subjectIDInput.value = p.subjectID;
-    const seedNum = Number.parseInt(p.subjectID.replace(/\D/g, '').slice(-9), 10);
-    p.rndSeed = Number.isFinite(seedNum) ? seedNum : Date.now();
-    // 本地保存 Excel 始终开启（与 exp1_clt 一致：默认行为，setup 阶段不提供点选卡，
-    //   避免被试误关导致数据丢失；服务器 / JATOS 上传逻辑照常运行）
-    p.saveLocal = true;
-
-    // 全角折算复用 normalizeDigits()（与组别校验同一个 helper）
+    // 留空仍生成匿名编号；需要跨任务配对时，使用主试发放的同一码。
+    const code = participantCodeInput ? participantCodeInput.value : '';
     p.debugMode = subGroupValue === '0';
+    if (!p.debugMode && code && !PARTICIPANT_CODE_PATTERN.test(code)) {
+        alert('研究编号须为 6–64 位英文字母、数字、下划线或连字符，且以字母或数字开头；也可以留空。');
+        participantCodeInput.focus();
+        return;
+    }
+    p.subjectID = !p.debugMode && code ? code : generateSubjectID(subGroupValue);
+    if (subjectIDInput) subjectIDInput.value = p.subjectID;
+    p.rndSeed = seedFromSubjectID(p.subjectID);
+    // 正式和调试均保留本地 Excel；调试不访问远端存储。
+    p.saveLocal = true;
 
     if (p.debugMode) {
         runtimeNumBlocks = 1;
@@ -306,10 +327,9 @@ document.getElementById('start-btn').addEventListener('click', async () => {
         }
     }
 
+    const storage = experimentStorage();
     try {
-        // experiment 决定 Batch Session 的进度键名（exp1_fcdt:<workerId>），
-        // 必须传，否则续做会退化成所有实验共用一个键
-        await window.CLTStorage.initializeStorage({ participant: p, experiment: EXPERIMENT_NAME });
+        if (storage) await storage.initializeStorage({ participant: p, experiment: EXPERIMENT_NAME });
     } catch (err) {
         // 云端不可用时仍继续实验，结束时保留本地 Excel 导出。
         console.warn('[CDT storage] initialization failed; continuing with local Excel fallback.', err);
@@ -320,7 +340,7 @@ document.getElementById('start-btn').addEventListener('click', async () => {
     // 试次序列因 PRNG 基准固定而与首次完全一致。
     // 归属校验（这条进度是否属于当前被试）已在存储层完成：不属于、或无法校验时返回 null。
     try {
-        const saved = await window.CLTStorage.loadProgress();
+        const saved = storage ? await storage.loadProgress() : null;
         if (saved && saved.completedBlocks > 0 && saved.completedBlocks < runtimeNumBlocks) {
             resumeStartBlock = saved.completedBlocks + 1;
             isResumedSession = true;
@@ -366,7 +386,7 @@ document.getElementById('start-btn').addEventListener('click', async () => {
             isResumedSession = false;
             resumedFromBlock = 0;
             resumeCount = 0;
-            window.CLTStorage.clearProgress();
+            if (storage) void storage.clearProgress();
             resumeNotice.classList.add('hidden');
             console.log('[' + EXPERIMENT_NAME + '] 被试选择从头重新开始，已清除线上进度。');
         });
@@ -460,6 +480,8 @@ window.addEventListener('keydown', (e) => {
         e.stopPropagation();
         return;
     }
+    if ((experimentPhase === 'upload' || experimentPhase === 'finished') && e.key === 'Enter' &&
+        (e.target?.id === 'upload-manual-download-link' || e.target?.id === 'manual-download-link')) return;
     if (inFormField) return;                               // 表单输入：放行所有普通按键
     if (e.key === 'Escape') {                              // 屏蔽 Esc 退出全屏
         e.preventDefault();
@@ -521,19 +543,14 @@ window.addEventListener('beforeunload', (e) => {
     return e.returnValue;
 });
 
-// (6) 页面失焦 / 切到后台：给出告警，但**不**清空数据、不终止试次
-let visibilityWarned = false;
+// 后台计时不可与正常试次混用；保留本地记录并安全结束本次运行。
 document.addEventListener('visibilitychange', () => {
-    if (document.hidden && !visibilityWarned) {
-        visibilityWarned = true;
-        console.warn('[' + EXPERIMENT_NAME + '] 页面失焦：被试切到其他窗口 / 标签页。');
-    } else if (!document.hidden) {
-        visibilityWarned = false;
-    }
+    if (document.hidden) endInterruptedSession('page_hidden');
 });
 window.addEventListener('blur', () => {
-    if (experimentPhase === 'trial_response' || experimentPhase === 'practice_response') {
-        console.warn('[' + EXPERIMENT_NAME + '] 实验进行中窗口失焦，请保持页面在前台。');
+    if (experimentPhase === 'trial_running' || experimentPhase === 'trial_response' ||
+        experimentPhase === 'practice_running' || experimentPhase === 'practice_response') {
+        endInterruptedSession('window_blur');
     }
 });
 
@@ -637,12 +654,14 @@ let clickSide = '';                  // 'left' | 'right'
 let practiceTrialData = {};
 let responseStartTime = 0;
 let responseTimeoutTimer = null;
+let endingEarly = false;
 const RESPONSE_LIMIT_MS = 4000;
 // exp1_fcdt 专用：变化方块索引及新颜色
 let changeItemIdx = 0;
 let changeColorIdx = 0;
 
 async function runPracticeTrial() {
+    if (endingEarly) return;
     if (practiceTrialIdx >= practiceTrials.length) {
         endPractice();
         return;
@@ -660,8 +679,7 @@ async function runPracticeTrial() {
     // ITI
     drawBackground(); drawFixation();
     await wait(prefs.ITI);
-
-    await showMemoryArrayPractice(condition);
+    if (!endingEarly) await showMemoryArrayPractice(condition);
 }
 
 async function showMemoryArrayPractice(condition) {
@@ -681,6 +699,7 @@ async function showMemoryArrayPractice(condition) {
     // 记忆阵列呈现时长：本试次所属条件的时长（50 / 200 / 500 / 1000 ms，2000 ms 条件已删除）
     const studyStartTime = performance.now();
     await wait(condition.studyDuration);
+    if (endingEarly) return;
     practiceTrialData.studyDurationActual = (performance.now() - studyStartTime).toFixed(2);
 
     // 保留间隔：恒定 1000 ms，不随呈现时长变化（本实验只操纵呈现时长）
@@ -688,6 +707,7 @@ async function showMemoryArrayPractice(condition) {
     // 避免记忆阵列消失后出现「空屏无注视点」的闪烁
     drawBackground(); drawFixation();
     await wait(prefs.retentionInterval);
+    if (endingEarly) return;
 
     // 确定变化方块及新颜色
     changeItemIdx = randInt(0, condition.setSize - 1);
@@ -901,6 +921,7 @@ function startBlock() {
 }
 
 async function runTrial() {
+    if (endingEarly) return;
     if (currentTrial >= blockTrials.length) {
         endBlock();
         return;
@@ -915,6 +936,7 @@ async function runTrial() {
         subName: p.subName,
         block: currentBlock,
         trial: currentTrial + 1,
+        TrialGlobal: formalTrialGlobalIdx + 1,
         setSize: condition.setSize,
         studyDuration: condition.studyDuration,   // 本试次的记忆阵列呈现时长（计划的）
         isChange: condition.change,
@@ -925,8 +947,7 @@ async function runTrial() {
     // ITI
     drawBackground(); drawFixation();
     await wait(prefs.ITI);
-
-    await showMemoryArray(condition);
+    if (!endingEarly) await showMemoryArray(condition);
 }
 
 async function showMemoryArray(condition) {
@@ -949,6 +970,7 @@ async function showMemoryArray(condition) {
     // 记忆阵列呈现时长：本试次所属条件的时长（50 / 200 / 500 / 1000 ms，2000 ms 条件已删除）
     const studyStartTime = performance.now();
     await wait(condition.studyDuration);
+    if (endingEarly) return;
     trialData.studyDurationActual = (performance.now() - studyStartTime).toFixed(2);
 
     // 保留间隔：恒定 1000 ms，不随呈现时长变化（本实验只操纵呈现时长）
@@ -956,6 +978,7 @@ async function showMemoryArray(condition) {
     // 避免记忆阵列消失后出现「空屏无注视点」的闪烁
     drawBackground(); drawFixation();
     await wait(prefs.retentionInterval);
+    if (endingEarly) return;
 
     // 确定变化方块及新颜色
     changeItemIdx = randInt(0, condition.setSize - 1);
@@ -1037,7 +1060,8 @@ function recordResponse(responseType) {
 
     const completedRow = prepareStorageRow(trialData);
     stimData.push(completedRow);
-    window.CLTStorage.saveTrial(completedRow);
+    const storage = experimentStorage();
+    if (storage) storage.saveTrial(completedRow);
 
     // ITI
     drawBackground(); drawFixation();
@@ -1063,7 +1087,8 @@ function blockAccuracyPct(blockNo) {
 function endBlock() {
     const blockAcc = blockAccuracyPct(currentBlock);
 
-    window.CLTStorage.saveCheckpoint({
+    const storage = experimentStorage();
+    if (storage) storage.saveCheckpoint({
         block: currentBlock,
         blockAccuracy: blockAcc,
         completedTrials: stimData.length,
@@ -1072,8 +1097,8 @@ function endBlock() {
 
     // 线上暂存：每完成一个 block 就把进度写进 JATOS Batch Session（仅 JATOS 后端实现）。
     // 只存"完成到第几组"；身份哈希由存储层自己注入，这里不传任何个人信息。
-    if (currentBlock < runtimeNumBlocks) {
-        window.CLTStorage.saveProgress({
+    if (storage && currentBlock < runtimeNumBlocks) {
+        storage.saveProgress({
             completedBlocks: currentBlock,
             resumeCount: isResumedSession ? resumeCount : 0,
             updatedAt: new Date().toISOString()
@@ -1086,6 +1111,12 @@ function endBlock() {
         // 问卷阶段已删除：最后一个 block 结束后直接进入 finishExperiment
         showFinalAccuracyScreen(blockAcc);
     }
+}
+
+function showFinalAccuracyScreen(blockAcc) {
+    switchScreen('final-accuracy');
+    experimentPhase = 'ending_wait';
+    document.getElementById('final-acc').innerText = `本组正确率为 ${blockAcc}%`;
 }
 
 function showBreakScreen(blockAcc) {
@@ -1136,14 +1167,26 @@ function nextBlock() {
 // 问卷阶段已删除：endBlock() 在最后一个 block 跑完后直接调用本函数。
 // 仍保留被试人口统计学字段回填（subName / subGender / subAge / subIdCard / subPhone / subjectID / rndSeed），
 // 仅去掉 tired / attention 量表字段的回填。
-async function finishExperiment() {
-    // 问卷已去：实验只要走到这里就算正常完成；调试模式仍会通过其它流程提前退出。
-    const completedNormally = stimData.length > 0;
+async function finishExperiment(completedNormally = true) {
+    if (experimentPhase === 'upload' || experimentPhase === 'finished') return;
     switchScreen('upload');
     experimentPhase = 'upload';
 
-    let uploadMsg = "";
+    const storage = completedNormally ? experimentStorage() : null;
+    const shouldUpload = Boolean(storage && stimData.length > 0);
+    let localStatus = '未选择导出。';
+    let cloudStatus = shouldUpload ? '正在保存，请稍候。'
+        : p.debugMode ? '调试模式，不上传。'
+        : !completedNormally ? '实验中断，不上传。'
+        : stimData.length === 0 ? '没有正式试次可上传。'
+        : '未配置服务器存储。';
     let storageSucceeded = false;
+
+    function renderSaveStatus() {
+        const message = '本地 Excel：' + localStatus + '\n服务器：' + cloudStatus;
+        document.getElementById('upload-status').innerText = message;
+        document.getElementById('finished-text').innerText = message;
+    }
 
     // 被试人口统计学字段回填到每一行（问卷字段不再回填）
     for (let d of stimData) {
@@ -1162,40 +1205,61 @@ async function finishExperiment() {
         d.resumeCount = isResumedSession ? resumeCount : 0;
     }
 
-    try {
-        const result = await window.CLTStorage.saveFinalResult({
-            trials: stimData
-            // questionnaire 字段已删除：CLTStorage 通用层仍能正常序列化（payload.questionnaire 为 undefined）
-        });
-        storageSucceeded = true;
-        uploadMsg += result && result.message ? result.message : '数据已保存。';
-        // 实验正常完成：清掉 Batch Session 里的进度，避免下次误判为"上次没做完"
-        await window.CLTStorage.clearProgress();
-    } catch (error) {
-        console.error("Storage Error:", error);
-        uploadMsg += "服务器保存失败: " + error.message + "。";
-    }
-
+    // 先在确认结束的键盘事件内生成 Excel，保留自动下载和手动下载入口，
+    // 不等待网络；两条保存结果分别显示。
     if (p.saveLocal && stimData.length > 0) {
-        downloadXLSX();
-        uploadMsg += "本地 Excel 已生成下载。";
+        try {
+            downloadXLSX();
+            localStatus = '已生成；若未自动下载，可点击下方链接。';
+        } catch (error) {
+            console.error('Excel export failed:', error);
+            localStatus = '导出失败，请联系主试。';
+        }
+    } else if (stimData.length === 0) {
+        localStatus = '没有正式试次可导出。';
     }
+    renderSaveStatus();
 
-    document.getElementById('upload-status').innerText = uploadMsg;
-    document.getElementById('finished-text').innerText = uploadMsg;
-    setTimeout(() => { switchScreen('finished'); }, 2000);
-
-    try {
-        await window.CLTStorage.finishExperiment({
-            successful: storageSucceeded && completedNormally,
-            message: completedNormally ? (EXPERIMENT_NAME + ' completed') : (EXPERIMENT_NAME + ' ended early')
-        });
-    } catch (error) {
-        console.error('Study finish failed:', error);
-    }
-
+    // 保存界面需要能直接点击下载链接；无需等到网络返回才解锁鼠标。
     try { if (document.exitPointerLock && document.pointerLockElement) document.exitPointerLock(); } catch (e) {}
-    try { if (document.exitFullscreen) document.exitFullscreen(); } catch (e) {}
+    try {
+        if (document.exitFullscreen && document.fullscreenElement) {
+            Promise.resolve(document.exitFullscreen()).catch(error => console.warn('Fullscreen exit failed:', error));
+        }
+    } catch (error) { console.warn('Fullscreen exit failed:', error); }
+
+    if (shouldUpload) {
+        try {
+            const result = await storage.saveFinalResult({ trials: stimData });
+            storageSucceeded = Boolean(result && result.saved === true);
+            cloudStatus = result && result.message ? result.message
+                : storageSucceeded ? '已保存。' : '未确认保存。';
+        } catch (error) {
+            console.error('Storage Error:', error);
+            cloudStatus = '保存失败：' + error.message + '。';
+        }
+        renderSaveStatus();
+        if (storageSucceeded) {
+            try { await storage.clearProgress(); }
+            catch (error) { console.warn('Failed to clear completed progress:', error); }
+        }
+    }
+
+    setTimeout(() => {
+        switchScreen('finished');
+        experimentPhase = 'finished';
+    }, 2000);
+
+    if (storage) {
+        try {
+            await storage.finishExperiment({
+                successful: storageSucceeded,
+                message: storageSucceeded ? (EXPERIMENT_NAME + ' completed') : (EXPERIMENT_NAME + ' cloud save unconfirmed')
+            });
+        } catch (error) {
+            console.error('Study finish failed:', error);
+        }
+    }
 }
 
 function prepareStorageRow(row) {
@@ -1236,6 +1300,7 @@ const EXCLUDE_TIMEOUT_FROM_K = true;   // false = 恢复旧口径（超时按错
 
 function isCountedTrial(d) {
     // 缺列的历史数据（老版本导出的行）按"计入"处理，保证兼容
+    if (d.TrialStatus === 'interrupted') return false;
     if (EXCLUDE_TIMEOUT_FROM_K && (d.CountedInK === 0 || d.timeout === true)) return false;
     return true;
 }
@@ -1248,12 +1313,13 @@ function buildKRow(ss, durationLabel, rows) {
 
     const nHit = changeTrials.filter(d => d.accuracy === 1).length;
     const nFA = noChangeTrials.filter(d => d.response === 1).length;
-    const hitRate = changeTrials.length > 0 ? nHit / changeTrials.length : 0;
-    const faRate = noChangeTrials.length > 0 ? nFA / noChangeTrials.length : 0;
+    const hitRate = changeTrials.length > 0 ? nHit / changeTrials.length : null;
+    const faRate = noChangeTrials.length > 0 ? nFA / noChangeTrials.length : null;
     // Pashler (1988) 全探测容量估计：K = N × (H − F) / (1 − F)
     // 当 F = 1（no-change 试次全部虚报）时 (1 − F) = 0，K 无定义 → 留空
     //   （导出为空单元格 / NA，绝不写 0，避免污染 GLM）
-    const kPashler = (1 - faRate) > 0 ? ss * (hitRate - faRate) / (1 - faRate) : '';
+    const kPashler = hitRate !== null && faRate !== null && faRate < 1
+        ? ss * (hitRate - faRate) / (1 - faRate) : '';
 
     const correctRTs = validRows.filter(d => d.accuracy === 1 && typeof d.rt === 'number').map(d => d.rt);
     const rtMean = correctRTs.length > 0
@@ -1261,7 +1327,9 @@ function buildKRow(ss, durationLabel, rows) {
         : '';
 
     const nCorrect = validRows.filter(d => d.accuracy === 1).length;
-    const accExclude = validRows.length > 0 ? nCorrect / validRows.length : 0;
+    const accExclude = validRows.length > 0 ? nCorrect / validRows.length : null;
+    const timeoutRows = rows.filter(d => d.TrialStatus === 'timeout' || d.timeout === true);
+    const interruptedRows = rows.filter(d => d.TrialStatus === 'interrupted');
 
     return {
         SubjectID: p.subjectID,
@@ -1277,20 +1345,21 @@ function buildKRow(ss, durationLabel, rows) {
         Condition: String(durationLabel) === '汇总' ? ('SS' + ss + '-汇总') : conditionLabel(durationLabel, ss),
         TotalTrials: rows.length,
         ValidTrials: validRows.length,            // 剔除超时后真正参与统计的试次
-        TimeoutTrials: rows.length - validRows.length,
-        TimeoutExclusionRate: (rows.length > 0 ? (rows.length - validRows.length) / rows.length : 0).toFixed(4),
+        TimeoutTrials: timeoutRows.length,
+        TimeoutExclusionRate: rows.length > 0 ? (timeoutRows.length / rows.length).toFixed(4) : '',
         CorrectTrials: nCorrect,                 // 与 exp1_clt 同名同义，便于跨范式合并
-        Accuracy_Exclude: accExclude.toFixed(4),  // 整体正确率（超时剔除口径）
+        Accuracy_Exclude: accExclude === null ? '' : accExclude.toFixed(4),  // 整体正确率（超时剔除口径）
         NChange: changeTrials.length,             // 有效 change 试次数（Hit 的分母）
         NNoChange: noChangeTrials.length,         // 有效 no-change 试次数（FA 的分母）
         HitCount: nHit,
         FalseAlarmCount: nFA,
-        HitRate: hitRate.toFixed(4),
-        FalseAlarmRate: faRate.toFixed(4),
+        HitRate: hitRate === null ? '' : hitRate.toFixed(4),
+        FalseAlarmRate: faRate === null ? '' : faRate.toFixed(4),
         // 主口径：Pashler (1988) 全探测公式 K = N × (H − F) / (1 − F)，超时剔除
         // 分母为 0 时留空（''），导出即空单元格
         K: typeof kPashler === 'number' ? kPashler.toFixed(4) : '',
-        MeanRT: rtMean === '' ? '' : rtMean.toFixed(4)  // 只取有效且正确的试次
+        MeanRT: rtMean === '' ? '' : rtMean.toFixed(4),  // 只取有效且正确的试次
+        InterruptedTrials: interruptedRows.length
     };
 }
 
@@ -1416,7 +1485,8 @@ const TRIAL_EXPORT_COLUMNS = [
     { header: 'CursorStartY',                get: (d) => exportNum(d.cursorStartY) },
     { header: 'CursorEndX',                  get: (d) => exportNum(d.cursorEndX) },
     { header: 'CursorEndY',                  get: (d) => exportNum(d.cursorEndY) },
-    { header: 'CursorTravelPx',              get: (d) => exportNum(d.cursorTravelPx) }
+    { header: 'CursorTravelPx',              get: (d) => exportNum(d.cursorTravelPx) },
+    { header: 'InterruptionReason', text: true, get: (d) => d.interruptionReason }
 ];
 
 // --- Sheet 2（K Values）/ Sheet 3（Summary SetSize）共用 ---
@@ -1426,7 +1496,7 @@ const K_EXPORT_COLUMNS = [
     'TotalTrials', 'ValidTrials', 'TimeoutTrials', 'TimeoutExclusionRate',
     'CorrectTrials', 'Accuracy_Exclude',
     'NChange', 'NNoChange', 'HitCount', 'FalseAlarmCount',
-    'HitRate', 'FalseAlarmRate', 'K', 'MeanRT'
+    'HitRate', 'FalseAlarmRate', 'K', 'MeanRT', 'InterruptedTrials'
 ];
 const K_TEXT_COLUMNS = new Set(['SubjectID', 'ExperimentType', 'Condition']);
 
@@ -1452,7 +1522,7 @@ function downloadXLSX() {
 
     // 全局试次序号（1..360）：长格式里用来查顺序效应 / 疲劳效应，
     // 先按原始实验顺序写好，Grouped Trials 重排后仍指向同一试次
-    stimData.forEach((d, i) => { d.TrialGlobal = i + 1; });
+    stimData.forEach((d, i) => { if (d.TrialGlobal == null) d.TrialGlobal = i + 1; });
 
     // ============================================================
     //  Sheet 1: Trial Data
@@ -1558,26 +1628,31 @@ function saveWorkbookFile(wb, fileName) {
     a.download = fileName;
     a.rel = 'noopener';
     a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-
-    console.log('[' + EXPERIMENT_NAME + '] 已导出 ' + fileName + '（' + u8.length + ' 字节，' +
-        wb.SheetNames.length + ' 个 sheet）');
     showManualDownload(fileName, url);
+    try {
+        document.body.appendChild(a);
+        a.click();
+    } catch (error) {
+        console.warn('Automatic Excel download failed; use the manual link.', error);
+    } finally {
+        a.remove();
+    }
+
+    console.log('[' + EXPERIMENT_NAME + '] 已生成 ' + fileName + '（' + u8.length + ' 字节，' +
+        wb.SheetNames.length + ' 个 sheet）');
 }
 
-// 结束界面上的手动下载入口（文件名与自动下载一致）
+// 保存等待与结束阶段的手动下载用同一个已生成文件，不重新导出。
 function showManualDownload(fileName, url) {
-    const box = document.getElementById('manual-download');
-    if (!box) return;
-    const link = document.getElementById('manual-download-link');
-    if (link) {
+    for (const id of ['upload-manual-download', 'manual-download']) {
+        const box = document.getElementById(id);
+        const link = document.getElementById(id + '-link');
+        if (!box || !link) continue;
         link.href = url;
         link.download = fileName;
         link.innerText = fileName;
+        box.classList.remove('hidden');
     }
-    box.classList.remove('hidden');
 }
 
 // ============================================================
@@ -1718,26 +1793,36 @@ window.addEventListener('mousemove', (e) => {
 });
 
 // 指针锁定状态：探测阶段使用锁定后的相对位移驱动虚拟光标。
+function endInterruptedSession(reason) {
+    const phase = experimentPhase;
+    if (endingEarly || phase === 'setup' || phase === 'ending_wait' || phase === 'upload' || phase === 'finished') return;
+    endingEarly = true;
+    clearTimeout(responseTimeoutTimer);
+    responseTimeoutTimer = null;
+    clearInterval(breakTimer);
+    breakTimer = null;
+    hideVirtualCursor();
+    if (phase === 'trial_running' || phase === 'trial_response') {
+        // 正式试次保留序号；异常中断不视作超时或答错。
+        stimData.push(prepareStorageRow({
+            ...trialData,
+            TrialStatus: 'interrupted', CountedInK: 0, interruptionReason: reason,
+            timeout: false, rt: null, response: null, accuracy: null
+        }));
+    }
+    void finishExperiment(false);
+}
+
 document.addEventListener('pointerlockchange', () => {
+    const wasLocked = pointerLocked;
     pointerLocked = (document.pointerLockElement === canvas);
     lastClientX = null;
     lastClientY = null;
-    if (!pointerLocked && cursorActive &&
-        (experimentPhase === 'trial_response' || experimentPhase === 'practice_response')) {
-        hideVirtualCursor();
-        alert('鼠标指针锁定已退出，当前试次已停止。请重新进入实验。');
-    }
+    if (wasLocked && !pointerLocked) endInterruptedSession('pointer_lock_lost');
 });
 
 document.addEventListener('fullscreenchange', () => {
-    if (!document.fullscreenElement && cursorActive &&
-        (experimentPhase === 'trial_response' || experimentPhase === 'practice_response')) {
-        hideVirtualCursor();
-        if (document.pointerLockElement === canvas && document.exitPointerLock) {
-            document.exitPointerLock();
-        }
-        alert('全屏已退出，当前试次已停止。请重新进入实验。');
-    }
+    if (!document.fullscreenElement) endInterruptedSession('fullscreen_exited');
 });
 
 // ============================================================
@@ -1761,8 +1846,8 @@ document.addEventListener('fullscreenchange', () => {
 //     ※ 需按具体文献调整间距时，只改 RING_SLOTS / RING_MIN_GAP 两个参数。
 //
 //  ③ 位置随机 + 分布均匀（"位置选择随机 / 没有过近或过远"）：
-//     每试次给整圈一个随机旋转 φ ∈ (−半槽距, +半槽距)，幅度不超过
-//     半槽距，槽位不会跨过坐标轴线；再在等间隔槽位里随机挑 setSize 个，
+//     整圈随机旋转的上限为半槽距减去中线净空所需角度。
+//     这样即使是最靠近中线的槽位，整个色块也留在同一判定半区；选 setSize 个位时，
 //     用"环形相邻间隔的均衡度"给组合评分，只从最均匀的一批里选，
 //     避免色块全挤在半圈（一侧留大片空白"过远"）或扎堆（"过近"）。
 //
@@ -1828,8 +1913,11 @@ function getStimLocs(nItems, cx, cy) {
     const chosen = pool[randInt(0, pool.length - 1)];
     lastRingSignature = chosen.sig;
 
-    // 整圈随机旋转：幅度小于半槽距，槽位不跨轴线；使绝对角度逐试次变化。
-    const rotation = (random() - 0.5) * RING_SLOT_STEP * Math.PI / 180;
+    // 按半个色块宽度加 1px 净空限制整圈旋转；色块像素边缘不跨左右判定线。
+    const halfSlotRadians = Math.PI / RING_SLOTS;
+    const minAxisAngle = Math.asin(Math.min(1, (S / 2 + 1) / radius));
+    const rotationLimit = Math.max(0, halfSlotRadians - minAxisAngle);
+    const rotation = (random() * 2 - 1) * rotationLimit;
 
     const picked = chosen.indices.slice();
     shuffleArray(picked);

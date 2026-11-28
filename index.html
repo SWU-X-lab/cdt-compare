@@ -24,13 +24,18 @@
     <div id="setup-phase" class="screen">
         <div class="card">
             <h1>全探测变化觉察任务</h1>
-            <p class="subtitle">请输入组别，系统将自动生成匿名被试编号</p>
+            <p class="subtitle">请输入组别；如主试发放了研究编号，请在下方填写</p>
 
             <form id="setup-form">
                 <div class="form-group">
                     <label for="subGroup">组别 (Group)</label>
                     <input type="text" id="subGroup" inputmode="numeric" maxlength="1"
                            pattern="[012]" placeholder="0=调试；1=先做FCDT后CLT；2=先做CLT后FCDT" required>
+                </div>
+                <div class="form-group">
+                    <label for="participantCode">研究编号（选填）</label>
+                    <input type="text" id="participantCode" maxlength="64" autocomplete="off" spellcheck="false"
+                           placeholder="填主试发放的随机编号，请勿填写个人信息">
                 </div>
                 <div class="form-group">
                     <label for="subjectID">匿名被试编号 (Subject ID)</label>
@@ -139,12 +144,24 @@
         </div>
     </div>
 
+    <!-- 4.5 最终正确率显示（最后一个 block 结束后显示，按 SPACE 进入结束语） -->
+    <div id="final-accuracy-phase" class="screen hidden match-break">
+        <div class="rest-stack">
+            <p class="rest-acc" id="final-acc">本组正确率为 0%</p>
+            <p class="rest-nudge">实验已全部完成</p>
+            <p class="rest-hint">请按【SPACE】键继续</p>
+        </div>
+    </div>
+
     <!-- 5. 上传/保存数据阶段 -->
     <div id="upload-phase" class="screen hidden">
         <div class="message-center">
             <h1>正在处理数据...</h1>
             <div class="spinner"></div>
-            <p id="upload-status">请勿关闭浏览器页面</p>
+            <p id="upload-status">正在准备数据，请勿关闭本页。</p>
+            <div id="upload-manual-download" class="hidden" style="margin-top: 1em;">
+                <a id="upload-manual-download-link" href="#" download>下载本地结果</a>
+            </div>
         </div>
     </div>
 
@@ -162,7 +179,7 @@
     </div>
 
     <!-- 版本号用于强制刷新浏览器缓存，每次修改 compare 脚本后请同步递增 -->
-    <script src="exp1_fcdt_compare.js?v=20261123compare-circle1"></script>
+    <script src="exp1_fcdt_compare.js?v=20261128-local-first1"></script>
 </body>
 
 </html>
