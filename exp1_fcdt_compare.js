@@ -480,6 +480,8 @@ window.addEventListener('keydown', (e) => {
         e.stopPropagation();
         return;
     }
+    if ((experimentPhase === 'upload' || experimentPhase === 'finished') && e.key === 'Enter' &&
+        (e.target?.id === 'upload-manual-download-link' || e.target?.id === 'manual-download-link')) return;
     if (inFormField) return;                               // 表单输入：放行所有普通按键
     if (e.key === 'Escape') {                              // 屏蔽 Esc 退出全屏
         e.preventDefault();
@@ -1171,10 +1173,20 @@ async function finishExperiment(completedNormally = true) {
     experimentPhase = 'upload';
 
     const storage = completedNormally ? experimentStorage() : null;
-    let uploadMsg = completedNormally
-        ? (p.debugMode ? '调试模式：不上传服务器。' : '')
-        : '实验已中断，未完整完成。本次仅保留本地记录，不上传服务器。';
+    const shouldUpload = Boolean(storage && stimData.length > 0);
+    let localStatus = '未选择导出。';
+    let cloudStatus = shouldUpload ? '正在保存，请稍候。'
+        : p.debugMode ? '调试模式，不上传。'
+        : !completedNormally ? '实验中断，不上传。'
+        : stimData.length === 0 ? '没有正式试次可上传。'
+        : '未配置服务器存储。';
     let storageSucceeded = false;
+
+    function renderSaveStatus() {
+        const message = '本地 Excel：' + localStatus + '\n服务器：' + cloudStatus;
+        document.getElementById('upload-status').innerText = message;
+        document.getElementById('finished-text').innerText = message;
+    }
 
     // 被试人口统计学字段回填到每一行（问卷字段不再回填）
     for (let d of stimData) {
@@ -1193,32 +1205,46 @@ async function finishExperiment(completedNormally = true) {
         d.resumeCount = isResumedSession ? resumeCount : 0;
     }
 
-    if (storage && stimData.length > 0) {
-        try {
-            const result = await storage.saveFinalResult({ trials: stimData });
-            storageSucceeded = Boolean(result && result.saved === true);
-            uploadMsg += result && result.message ? result.message : '未确认服务器保存。';
-            if (storageSucceeded) await storage.clearProgress();
-        } catch (error) {
-            console.error('Storage Error:', error);
-            uploadMsg += '服务器保存失败：' + error.message + '。';
-        }
-    }
-
+    // 先在确认结束的键盘事件内生成 Excel，保留自动下载和手动下载入口，
+    // 不等待网络；两条保存结果分别显示。
     if (p.saveLocal && stimData.length > 0) {
         try {
             downloadXLSX();
-            uploadMsg += '本地 Excel 已生成下载。';
+            localStatus = '已生成；若未自动下载，可点击下方链接。';
         } catch (error) {
             console.error('Excel export failed:', error);
-            uploadMsg += '本地 Excel 导出失败，请联系主试。';
+            localStatus = '导出失败，请联系主试。';
         }
-    } else if (!completedNormally) {
-        uploadMsg += '没有正式试次可导出。';
+    } else if (stimData.length === 0) {
+        localStatus = '没有正式试次可导出。';
+    }
+    renderSaveStatus();
+
+    // 保存界面需要能直接点击下载链接；无需等到网络返回才解锁鼠标。
+    try { if (document.exitPointerLock && document.pointerLockElement) document.exitPointerLock(); } catch (e) {}
+    try {
+        if (document.exitFullscreen && document.fullscreenElement) {
+            Promise.resolve(document.exitFullscreen()).catch(error => console.warn('Fullscreen exit failed:', error));
+        }
+    } catch (error) { console.warn('Fullscreen exit failed:', error); }
+
+    if (shouldUpload) {
+        try {
+            const result = await storage.saveFinalResult({ trials: stimData });
+            storageSucceeded = Boolean(result && result.saved === true);
+            cloudStatus = result && result.message ? result.message
+                : storageSucceeded ? '已保存。' : '未确认保存。';
+        } catch (error) {
+            console.error('Storage Error:', error);
+            cloudStatus = '保存失败：' + error.message + '。';
+        }
+        renderSaveStatus();
+        if (storageSucceeded) {
+            try { await storage.clearProgress(); }
+            catch (error) { console.warn('Failed to clear completed progress:', error); }
+        }
     }
 
-    document.getElementById('upload-status').innerText = uploadMsg;
-    document.getElementById('finished-text').innerText = uploadMsg;
     setTimeout(() => {
         switchScreen('finished');
         experimentPhase = 'finished';
@@ -1234,9 +1260,6 @@ async function finishExperiment(completedNormally = true) {
             console.error('Study finish failed:', error);
         }
     }
-
-    try { if (document.exitPointerLock && document.pointerLockElement) document.exitPointerLock(); } catch (e) {}
-    try { if (document.exitFullscreen) document.exitFullscreen(); } catch (e) {}
 }
 
 function prepareStorageRow(row) {
@@ -1605,26 +1628,31 @@ function saveWorkbookFile(wb, fileName) {
     a.download = fileName;
     a.rel = 'noopener';
     a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-
-    console.log('[' + EXPERIMENT_NAME + '] 已导出 ' + fileName + '（' + u8.length + ' 字节，' +
-        wb.SheetNames.length + ' 个 sheet）');
     showManualDownload(fileName, url);
+    try {
+        document.body.appendChild(a);
+        a.click();
+    } catch (error) {
+        console.warn('Automatic Excel download failed; use the manual link.', error);
+    } finally {
+        a.remove();
+    }
+
+    console.log('[' + EXPERIMENT_NAME + '] 已生成 ' + fileName + '（' + u8.length + ' 字节，' +
+        wb.SheetNames.length + ' 个 sheet）');
 }
 
-// 结束界面上的手动下载入口（文件名与自动下载一致）
+// 保存等待与结束阶段的手动下载用同一个已生成文件，不重新导出。
 function showManualDownload(fileName, url) {
-    const box = document.getElementById('manual-download');
-    if (!box) return;
-    const link = document.getElementById('manual-download-link');
-    if (link) {
+    for (const id of ['upload-manual-download', 'manual-download']) {
+        const box = document.getElementById(id);
+        const link = document.getElementById(id + '-link');
+        if (!box || !link) continue;
         link.href = url;
         link.download = fileName;
         link.innerText = fileName;
+        box.classList.remove('hidden');
     }
-    box.classList.remove('hidden');
 }
 
 // ============================================================

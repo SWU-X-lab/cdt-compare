@@ -158,7 +158,10 @@
         <div class="message-center">
             <h1>正在处理数据...</h1>
             <div class="spinner"></div>
-            <p id="upload-status">请勿关闭浏览器页面</p>
+            <p id="upload-status">正在准备数据，请勿关闭本页。</p>
+            <div id="upload-manual-download" class="hidden" style="margin-top: 1em;">
+                <a id="upload-manual-download-link" href="#" download>下载本地结果</a>
+            </div>
         </div>
     </div>
 
@@ -176,7 +179,7 @@
     </div>
 
     <!-- 版本号用于强制刷新浏览器缓存，每次修改 compare 脚本后请同步递增 -->
-    <script src="exp1_fcdt_compare.js?v=20261126-data-qc1"></script>
+    <script src="exp1_fcdt_compare.js?v=20261128-local-first1"></script>
 </body>
 
 </html>
